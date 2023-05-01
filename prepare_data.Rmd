@@ -1,0 +1,325 @@
+---
+title: "00_prepare_data"
+author: "Jeremias N. Brand"
+date: "2022-10-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source('./R/functions.R')
+library(ggplot2)
+library(readxl)
+library(writexl)
+library(dplyr)
+library(ggrepel)
+library(forcats)
+library(ape)
+library(phytools)
+library(phangorn)
+library(RColorBrewer)
+# library(devtools)
+# install_github("glmgen/genlasso")
+# install_github("khabbazian/l1ou")
+library(l1ou)
+
+BS_iterations = 100
+cores = 5
+bootstrap = FALSE
+```
+
+## Getting the data
+
+The tree and alignments come from this paper: Brand, J. N., G. Viktorin, R. A. W. Wiberg, C. Beisel, and L. Schärer. 2022. Large-scale phylogenomics of the genus Macrostomum (Platyhelminthes) reveals cryptic diversity and novel sexual traits. Molecular Phylogenetics and Evolution 166:107296. [DOI](https://doi.org/10.1016/j.ympev.2021.107296)
+
+Download and extract *noPrimer_H.tar.gz*, *28S_C.aln*, and *trees.tar.gz* from the Zenodo archive at [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.4543289.svg)](https://doi.org/10.5281/zenodo.4543289) and put them into the lib directory.
+
+Get the supplementary table with assignment of 28S here: [mmc6](https://ars.els-cdn.com/content/image/1-s2.0-S1055790321002293-mmc6.xlsx)
+
+
+Loading morphological data.
+
+```{r}
+df <- read_excel("lib/Morphology_data_2021-02-22.xlsx")
+
+df2 <- df |>
+  select(Short, ID, total_sprmLen_um:brstlLen_um_per_sperm)
+
+sum_df <- df2 |>
+  select(-ID) |>
+  group_by(Short) |>
+  summarise_all(mean, na.rm = TRUE) |>
+  # only those that have ansperm measures
+  filter(!is.na(antSpermLength_um))
+
+
+out_sum_df <- df2 |>
+  select(-ID) |>
+  group_by(Short) |>
+  summarise(
+            across(everything(), 
+                   list(mean = function(.x) mean(.x, na.rm = TRUE),
+                        SD = function(.x) sd(.x, na.rm = TRUE),
+                        min =function(.x) min(.x, na.rm = TRUE),
+                        max = function(.x) max(.x, na.rm = TRUE),
+                        N = function(.x) sum(!is.na(.x))),
+                        .names = "{.col}_{.fn}")) |>
+  filter(!is.na(antSpermLength_um_mean))
+
+N_df <- df2 |>
+  select(-ID) |>
+  group_by(Short) |>
+  summarise_all(function(x) sum(!is.na(x))) |>
+  # only those that have ansperm measures
+  filter(!is.na(antSpermLength_um))
+```
+
+# Get the phylogenetic tree and change the tip labels to conform to the ones from the morphology table
+
+```{r}
+t_UM <- read.tree("lib/C-IQ-TREE-noPrimer-UM.tre")
+t_UM$tip.label
+
+# subset to only one representative specimen per species
+subset_df <- read_excel('lib/MPE_Tab_S2.xlsx', sheet = 2) |> 
+  filter(included_in_comparative_analysis == 'no')
+t_UM$tip.label %in% subset_df$Assembly
+
+
+to_drop <- t_UM$tip.label[t_UM$tip.label %in% subset_df$Assembly]
+to_drop
+t_UM <- drop.tip(t_UM, to_drop)
+
+sort(t_UM$tip.label)
+tree_name = t_UM$tip.label
+simple_tips <- gsub('_$','',gsub('([^_]+_?[a-z]?).+', '\\1', t_UM$tip.label))
+
+name_df = data.frame(tree_name, simple_tips)
+```
+
+# Subset data
+
+```{r}
+EL3 <- read_excel('lib/Evolution_Letters_Tab_S3.xlsx', sheet = 2)
+
+reciprocal_species <- EL3 |>
+  filter(inferred_syndrome == 'reciprocal') |>
+  pull(Short)
+
+selection <- name_df |>
+  filter(simple_tips %in% reciprocal_species) |>
+  # some duplicates are still there because of renaming
+  filter(!tree_name %in% c(
+    "Mac044_MTP_LS_2156",'Maccli_2930_20180705',
+    'Maclig_MTP_LS_244','Macqui_KY652218')) |>
+  # remove Mac082 because it does not have bristels 
+  filter(simple_tips != 'Mac082') |>
+  # filter those that have measurments
+  filter(simple_tips %in% sum_df$Short)
+  
+# subset tree to reciprocal species with measurements 
+to_drop <- t_UM$tip.label[!t_UM$tip.label %in% selection$tree_name]
+to_drop
+tre <- drop.tip(t_UM, to_drop)
+match(tre$tip.label, selection$tree_name)
+tre$tip.label <- selection$simple_tips
+
+
+df3 <- filter(sum_df, Short %in% selection$simple_tips) |>
+  mutate(sperm_ratio = antSpermLength_um/total_sprmLen_um)
+
+per_sp_sum <- df3 |>
+  select(-Short,
+         total_sprmLen_um,
+         antSpermLength_um,
+         brstlLen_um_per_sperm,
+         sperm_ratio) |>
+  summarise(N = n(), 
+            across(everything(), 
+                   list(mean = function(.x) mean(.x, na.rm = TRUE),
+                        SD = function(.x) sd(.x, na.rm = TRUE),
+                        min =function(.x) min(.x, na.rm = TRUE),
+                        max = function(.x) max(.x, na.rm = TRUE),
+                        N = function(.x) sum(!is.na(.x))),
+                        .names = "{.col}_{.fn}")) 
+
+# output xlsx
+write_xlsx(
+  x = list(
+    trait_data = df3,
+    morphology = filter(out_sum_df, Short %in% df3$Short),
+    N = filter(N_df, Short %in% df3$Short),
+    across_species_summary = per_sp_sum
+  ),
+  path = 'output/trait_summary.xlsx'
+)
+
+```
+
+Log transform the data
+
+```{r}
+df3 <- select(df3, Short, total_sprmLen_um, antSpermLength_um, brstlLen_um_per_sperm, sperm_ratio)
+df3[,c(2:4)] <- log10(df3[,c(2:4)])
+```
+
+# adjust tree
+
+```{r}
+is.ultrametric(tre)
+# this is a precision issue
+# see http://blog.phytools.org/2017/03/forceultrametric-method-for-ultrametric.html
+tre_UM <- ladderize(force.ultrametric(tre))
+```
+
+## output tree and trait data
+
+```{r}
+comp_data <- list(tre_UM, df3)
+saveRDS(comp_data, 'output/comp_data_main.rds')
+```
+
+# Now prepare data for the sperm lenght only
+
+Loading morphological data. Only select sperm length.
+
+```{r}
+df <- read_excel("lib/Morphology_data_2021-02-22.xlsx")
+df2 <- df |>
+  select(Short, ID, total_sprmLen_um)
+
+sum_df <- df2 |>
+  select(-ID) |>
+  group_by(Short) |>
+  summarise_all(mean, na.rm = TRUE) 
+
+out_sum_df <- df2 |>
+  select(-ID) |>
+  group_by(Short) |>
+  summarise(
+            across(everything(), 
+                   list(mean = function(.x) mean(.x, na.rm = TRUE),
+                        SD = function(.x) sd(.x, na.rm = TRUE),
+                        min =function(.x) min(.x, na.rm = TRUE),
+                        max = function(.x) max(.x, na.rm = TRUE),
+                        N = function(.x) sum(!is.na(.x))),
+                        .names = "{.col}_{.fn}")) 
+
+N_df <- df2 |>
+  select(-ID) |>
+  group_by(Short) |>
+  summarise_all(function(x) sum(!is.na(x))) 
+```
+
+# Get the phylogenetic tree and change the tip labels to conform to the ones from the morphology table
+
+```{r}
+t_UM <- read.tree("lib/C-IQ-TREE-noPrimer-UM.tre")
+t_UM$tip.label
+
+# subset to only one representative specimen per species
+subset_df <- read_excel('lib/MPE_Tab_S2.xlsx', sheet = 2) |> 
+  filter(included_in_comparative_analysis == 'no')
+t_UM$tip.label %in% subset_df$Assembly
+
+
+to_drop <- t_UM$tip.label[t_UM$tip.label %in% subset_df$Assembly]
+to_drop
+t_UM <- drop.tip(t_UM, to_drop)
+
+sort(t_UM$tip.label)
+tree_name = t_UM$tip.label
+simple_tips <- gsub('_$','',gsub('([^_]+_?[a-z]?).+', '\\1', t_UM$tip.label))
+
+name_df = data.frame(tree_name, simple_tips)
+```
+
+# Subset data
+
+```{r}
+EL3 <- read_excel('lib/Evolution_Letters_Tab_S3.xlsx', sheet = 2)
+
+df3 <- filter(sum_df, Short %in% name_df$simple_tips) |> 
+  # remove species with no measurements
+  filter(!is.na(total_sprmLen_um))
+
+
+selection <- name_df |>
+  # some duplicates are still there because of renaming
+  filter(!tree_name %in% c(
+    "Mac044_MTP_LS_2156",'Maccli_2930_20180705',
+    'Maclig_MTP_LS_244','Macqui_KY652218')) |>
+  # filter those that have measurments
+  filter(simple_tips %in% df3$Short)
+  
+# subset tree to reciprocal species with measurements 
+to_drop <- t_UM$tip.label[!t_UM$tip.label %in% selection$tree_name]
+to_drop
+tre <- drop.tip(t_UM, to_drop)
+match(tre$tip.label, selection$tree_name)
+tre$tip.label <- selection$simple_tips
+
+
+per_sp_sum <- df3 |>
+  select(-Short,
+         total_sprmLen_um) |>
+  summarise(N = n(), 
+            across(everything(), 
+                   list(mean = function(.x) mean(.x, na.rm = TRUE),
+                        SD = function(.x) sd(.x, na.rm = TRUE),
+                        min =function(.x) min(.x, na.rm = TRUE),
+                        max = function(.x) max(.x, na.rm = TRUE),
+                        N = function(.x) sum(!is.na(.x))),
+                        .names = "{.col}_{.fn}")) 
+
+# output xlsx
+write_xlsx(
+  x = list(
+    trait_data = df3,
+    morphology = filter(out_sum_df, Short %in% df3$Short),
+    N = filter(N_df, Short %in% df3$Short),
+    across_species_summary = per_sp_sum
+  ),
+  path = 'output/sprmLen_only_trait_summary.xlsx'
+)
+
+```
+
+Log transform the data
+
+```{r}
+df3[,2] <- log10(df3[,2])
+```
+
+# adjust tree
+
+## We want to redo the previous analysis but exclude the hypodermic clade
+
+```{r}
+r_clade <- extract.clade(tre, 117, root.edge = 0, collapse.singles = TRUE,
+              interactive = FALSE)
+
+plot(r_clade)
+tre <- r_clade
+```
+
+## adjust the morphological data to match
+
+```{r}
+df3 <- df3 |> 
+  filter(Short %in% tre$tip.label)
+```
+
+```{r}
+is.ultrametric(tre)
+# this is a precision issue
+# see http://blog.phytools.org/2017/03/forceultrametric-method-for-ultrametric.html
+tre_UM <- ladderize(force.ultrametric(tre))
+```
+
+## output tree and trait data
+
+```{r}
+comp_data <- list(tre_UM, df3)
+saveRDS(comp_data, 'output/comp_data_sprmLen_only.rds')
+```

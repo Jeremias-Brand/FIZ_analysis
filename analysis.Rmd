@@ -1,0 +1,12 @@
+---
+title: "analysis"
+author: "Jeremias N. Brand"
+date: "2023-05-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## To run the analysis we execute `R/l1ou.R`, `R/PGLS.R`, and `R/plot.R` 
